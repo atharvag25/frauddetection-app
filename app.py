@@ -446,7 +446,7 @@ with st.form("prediction_form"):
         input_values['amount'] = st.number_input(
             "Transaction Amount",
             min_value=0.0,
-            max_value=100000.0,
+            max_value=1000000.0,
             value=1000.0,
             step=10.0
         )
