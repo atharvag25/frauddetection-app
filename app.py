@@ -1,193 +1,399 @@
-# Add these enhancements to your existing app.py
+import os
+import streamlit as st
+import pandas as pd
+import joblib
+import pickle
+import traceback
+from pathlib import Path
+from datetime import datetime
 
-# 1. ADD THIS AFTER THE PREDICTION RESULTS SECTION (around line 350)
-# Add visualization of prediction confidence
+# Page configuration - MUST be first Streamlit command
+st.set_page_config(
+    page_title="Fraud Detection System",
+    page_icon="🛡️",
+    layout="centered",
+    initial_sidebar_state="expanded"
+)
 
-        # Enhanced Results Display with Gauge Chart
-        if probability is not None:
-            import plotly.graph_objects as go
-            
-            # Create gauge chart for fraud probability
-            fig = go.Figure(go.Indicator(
-                mode = "gauge+number+delta",
-                value = probability * 100,
-                domain = {'x': [0, 1], 'y': [0, 1]},
-                title = {'text': "Fraud Risk Score", 'font': {'size': 24}},
-                delta = {'reference': 50, 'increasing': {'color': "red"}},
-                gauge = {
-                    'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                    'bar': {'color': "red" if probability > 0.5 else "green"},
-                    'bgcolor': "white",
-                    'borderwidth': 2,
-                    'bordercolor': "gray",
-                    'steps': [
-                        {'range': [0, 30], 'color': '#90EE90'},
-                        {'range': [30, 70], 'color': '#FFD700'},
-                        {'range': [70, 100], 'color': '#FF6B6B'}
-                    ],
-                    'threshold': {
-                        'line': {'color': "red", 'width': 4},
-                        'thickness': 0.75,
-                        'value': 50
-                    }
-                }
-            ))
-            
-            fig.update_layout(
-                height=300,
-                margin=dict(l=20, r=20, t=50, b=20),
-                paper_bgcolor="rgba(0,0,0,0)",
-                font={'color': "white", 'family': "Arial"}
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+# Custom CSS
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# 2. ADD TRANSACTION HISTORY TRACKING
-# Add this before the prediction form (around line 235)
+st.markdown('<p class="main-header">🛡️ Fraud Detection System</p>', unsafe_allow_html=True)
 
-# Initialize session state for transaction history
-if 'transaction_history' not in st.session_state:
-    st.session_state.transaction_history = []
+# Configuration
+MODEL_BASENAME = "fraud_detector_final"
+MODEL_EXT_CANDIDATES = [".pkl", ".joblib"]
+DATA_BASENAME = "FRAUD DETECTION"
+DATA_EXT_CANDIDATES = [".csv", ".xlsx", ".xls"]
 
-# Add this inside the prediction success block (around line 355)
-        # Save to history
-        st.session_state.transaction_history.append({
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'transaction_id': input_values['transaction_id'],
-            'amount': input_values['amount'],
-            'location': input_values['location'],
-            'prediction': 'FRAUD' if int(prediction) == 1 else 'SAFE',
-            'probability': f"{probability:.2%}" if probability else "N/A"
-        })
+def get_file_list():
+    """Get list of files in current directory"""
+    try:
+        cwd = Path.cwd()
+        return sorted([f.name for f in cwd.iterdir() if f.is_file()])
+    except Exception as e:
+        st.error(f"Failed to list directory: {e}")
+        return []
 
-# Add this in the sidebar (around line 210)
-    if st.session_state.transaction_history:
-        st.markdown("---")
-        st.markdown("### 📜 Recent Predictions")
-        history_df = pd.DataFrame(st.session_state.transaction_history[-5:])  # Last 5
-        st.dataframe(history_df, use_container_width=True)
+def find_model_file():
+    """Return filepath of the model if found"""
+    cwd = Path.cwd()
+    files = get_file_list()
+    
+    for ext in MODEL_EXT_CANDIDATES:
+        model_file = MODEL_BASENAME + ext
+        for f in files:
+            if f.lower() == model_file.lower():
+                return cwd / f
+    
+    for f in files:
+        if MODEL_BASENAME.lower() in f.lower():
+            return cwd / f
+    return None
+
+def find_data_file():
+    """Return filepath and ext if found"""
+    cwd = Path.cwd()
+    files = get_file_list()
+    
+    for ext in DATA_EXT_CANDIDATES:
+        data_file = DATA_BASENAME + ext
+        for f in files:
+            if f.lower() == data_file.lower():
+                return cwd / f, ext
+    
+    for f in files:
+        if DATA_BASENAME.lower() in f.lower():
+            ext = Path(f).suffix.lower()
+            return cwd / f, ext
+    return None, None
+
+@st.cache_resource
+def load_model(path):
+    """Load model with joblib or pickle"""
+    try:
+        model = joblib.load(path)
+        return model, "joblib"
+    except Exception:
+        try:
+            with open(path, "rb") as f:
+                model = pickle.load(f)
+            return model, "pickle"
+        except Exception as e:
+            st.error(f"Failed to load model: {e}")
+            return None, None
+
+@st.cache_data
+def load_dataset(path, ext):
+    """Load CSV or Excel dataset"""
+    try:
+        if ext == ".csv" or str(path).lower().endswith(".csv"):
+            df = pd.read_csv(path, low_memory=False)
+        elif ext in [".xlsx", ".xls"]:
+            df = pd.read_excel(path)
+        else:
+            df = pd.read_csv(path, low_memory=False)
+        return df
+    except Exception as e:
+        st.error(f"Failed to load dataset: {e}")
+        return None
+
+def calculate_fraud_rates(df, column, target='is_fraud'):
+    """Calculate fraud rate for categorical columns"""
+    if column not in df.columns or target not in df.columns:
+        return {}
+    fraud_rates = df.groupby(column)[target].mean().to_dict()
+    return fraud_rates
+
+def engineer_features(input_data, df=None):
+    """
+    Create all engineered features that the model expects
+    Based on your dataset structure
+    """
+    data = input_data.copy()
+    
+    # Extract datetime features if transaction_date exists
+    if 'transaction_date' in data.columns:
+        data['transaction_date'] = pd.to_datetime(data['transaction_date'], errors='coerce')
+        data['tx_hour'] = data['transaction_date'].dt.hour
+        data['tx_weekday'] = data['transaction_date'].dt.dayofweek
+        data['is_weekend'] = (data['tx_weekday'] >= 5).astype(int)
+        data['is_night'] = ((data['tx_hour'] >= 22) | (data['tx_hour'] <= 6)).astype(int)
+    else:
+        # Use defaults if no date column
+        data['tx_hour'] = 12
+        data['tx_weekday'] = 2
+        data['is_weekend'] = 0
+        data['is_night'] = 0
+    
+    # Create interaction features
+    if 'amount' in data.columns and 'customer_age' in data.columns:
+        data['amount_per_age'] = data['amount'] / (data['customer_age'] + 1)
+    else:
+        data['amount_per_age'] = 0
+    
+    # Calculate fraud rates from training data
+    if df is not None:
+        # Purchase category fraud rate
+        if 'purchase_category' in data.columns and 'purchase_category' in df.columns:
+            fraud_rates = calculate_fraud_rates(df, 'purchase_category')
+            data['purchase_category_fraud_rate'] = data['purchase_category'].map(fraud_rates).fillna(0.5)
+        else:
+            data['purchase_category_fraud_rate'] = 0.5
         
-        if st.button("Clear History"):
-            st.session_state.transaction_history = []
-            st.rerun()
-
-# 3. ADD BATCH PREDICTION FEATURE
-# Add this after the single prediction form (around line 350)
-
-st.markdown("---")
-st.header("📊 Batch Prediction")
-
-with st.expander("Upload CSV for Batch Processing"):
-    uploaded_file = st.file_uploader("Upload Transaction CSV", type=['csv'])
+        # Location fraud rate
+        if 'location' in data.columns and 'location' in df.columns:
+            fraud_rates = calculate_fraud_rates(df, 'location')
+            data['location_fraud_rate'] = data['location'].map(fraud_rates).fillna(0.5)
+        else:
+            data['location_fraud_rate'] = 0.5
+    else:
+        # Use default values if no training data available
+        data['purchase_category_fraud_rate'] = 0.5
+        data['location_fraud_rate'] = 0.5
     
-    if uploaded_file is not None:
-        batch_df = pd.read_csv(uploaded_file)
-        st.write(f"Loaded {len(batch_df)} transactions")
-        st.dataframe(batch_df.head())
+    return data
+
+# Sidebar
+with st.sidebar:
+    st.header("📊 System Information")
+    
+    with st.expander("🔍 Debug Info", expanded=False):
+        st.write("**Working Directory:**")
+        st.code(str(Path.cwd()))
         
-        if st.button("🔍 Run Batch Prediction"):
-            with st.spinner("Processing batch predictions..."):
-                try:
-                    # Engineer features for batch
-                    X_batch = engineer_features(batch_df, df)
-                    
-                    # Make predictions
-                    predictions = model.predict(X_batch)
-                    probabilities = model.predict_proba(X_batch)[:, 1] if hasattr(model, "predict_proba") else None
-                    
-                    # Add results to dataframe
-                    batch_df['prediction'] = ['FRAUD' if p == 1 else 'SAFE' for p in predictions]
-                    if probabilities is not None:
-                        batch_df['fraud_probability'] = probabilities
-                    
-                    st.success(f"✅ Processed {len(batch_df)} transactions")
-                    
-                    # Show results
-                    fraud_count = sum(predictions)
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Total Transactions", len(batch_df))
-                    with col2:
-                        st.metric("Fraud Detected", fraud_count)
-                    with col3:
-                        st.metric("Fraud Rate", f"{fraud_count/len(batch_df):.1%}")
-                    
-                    # Display results
-                    st.dataframe(batch_df)
-                    
-                    # Download results
-                    csv = batch_df.to_csv(index=False)
-                    st.download_button(
-                        "📥 Download Results",
-                        csv,
-                        "fraud_predictions.csv",
-                        "text/csv",
-                        key='download-csv'
-                    )
-                    
-                except Exception as e:
-                    st.error(f"Batch prediction failed: {str(e)}")
-
-# 4. ADD MODEL PERFORMANCE METRICS
-# Add this in the sidebar after model is loaded (around line 220)
-
-    if model is not None and df is not None:
-        st.markdown("---")
-        st.markdown("### 📈 Model Info")
-        
-        with st.expander("Model Details"):
-            st.write(f"**Model Type:** {type(model).__name__}")
-            
-            if hasattr(model, 'n_estimators'):
-                st.write(f"**Trees:** {model.n_estimators}")
-            
-            if hasattr(model, 'feature_importances_') and hasattr(model, 'feature_names_in_'):
-                st.write("**Top 5 Important Features:**")
-                importances = pd.DataFrame({
-                    'feature': model.feature_names_in_,
-                    'importance': model.feature_importances_
-                }).sort_values('importance', ascending=False).head(5)
-                
-                for idx, row in importances.iterrows():
-                    st.text(f"• {row['feature']}: {row['importance']:.4f}")
-
-# 5. ADD EXPORT FUNCTIONALITY
-# Add this after the prediction results (around line 365)
-
-        # Export Report
-        st.markdown("---")
-        if st.button("📄 Generate PDF Report"):
-            st.info("PDF generation would require additional libraries like reportlab or fpdf")
-            st.code("""
-# To enable PDF reports, install:
-pip install reportlab
-
-# Then use reportlab to generate PDF with prediction details
-            """)
-
-# 6. ADD REAL-TIME STATISTICS
-# Add this at the top of the main area (around line 225)
-
-if df is not None:
-    st.markdown("### 📊 Dataset Statistics")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Total Records", f"{len(df):,}")
-    
-    with col2:
-        if 'is_fraud' in df.columns:
-            fraud_rate = df['is_fraud'].mean()
-            st.metric("Fraud Rate", f"{fraud_rate:.2%}")
-    
-    with col3:
-        if 'amount' in df.columns:
-            avg_amount = df['amount'].mean()
-            st.metric("Avg Amount", f"${avg_amount:,.2f}")
-    
-    with col4:
-        if 'location' in df.columns:
-            unique_locations = df['location'].nunique()
-            st.metric("Locations", unique_locations)
+        st.write("**Files in Directory:**")
+        files = get_file_list()
+        if files:
+            for f in files:
+                st.text(f"• {f}")
+        else:
+            st.warning("No files found")
     
     st.markdown("---")
+    st.markdown("### 📖 Instructions")
+    st.markdown("""
+    1. Ensure model file is in the directory
+    2. Enter transaction details
+    3. Click **Predict** to check for fraud
+    """)
+
+# Load model
+model_path = find_model_file()
+model = None
+model_method = None
+
+if model_path and model_path.exists():
+    st.success(f"✅ Model found: `{model_path.name}`")
+    model, model_method = load_model(model_path)
+    if model:
+        st.info(f"📦 Loaded using: **{model_method}**")
+else:
+    st.error(f"❌ Model not found. Please place `{MODEL_BASENAME}.pkl` or `.joblib` in: {Path.cwd()}")
+
+# Load dataset (for fraud rate calculations and getting unique values)
+data_path, data_ext = find_data_file()
+df = None
+
+if data_path and data_path.exists():
+    st.success(f"✅ Dataset found: `{data_path.name}`")
+    df = load_dataset(data_path, data_ext)
+    
+    if df is not None:
+        with st.expander("📊 Dataset Preview", expanded=False):
+            st.dataframe(df.head(10))
+            st.write(f"**Shape:** {df.shape[0]} rows × {df.shape[1]} columns")
+            st.write("**Columns:**", list(df.columns))
+else:
+    st.warning("⚠️ Dataset not found. Using default values.")
+
+# Stop if no model
+if model is None:
+    st.error("🚫 Cannot proceed without a model.")
+    st.stop()
+
+# Get unique values from dataset for dropdowns
+def get_unique_values(df, column, default_values):
+    """Get unique values from dataset or use defaults"""
+    if df is not None and column in df.columns:
+        unique_vals = df[column].dropna().unique().tolist()
+        return sorted([str(v) for v in unique_vals])
+    return default_values
+
+# Define options based on your dataset
+card_type_options = get_unique_values(df, 'card_type', ['Rupay', 'MasterCard', 'Visa'])
+location_options = get_unique_values(df, 'location', ['Bangalore', 'Surat', 'Hyderabad', 'Mumbai', 'Kolkata', 'Jaipur', 'Delhi', 'Chennai', 'Pune', 'Ahmedabad'])
+purchase_category_options = get_unique_values(df, 'purchase_category', ['POS', 'Digital'])
+fraud_type_options = get_unique_values(df, 'fraud_type', ['Identity theft', 'Malware', 'Payment card fraud', 'scam', 'phishing'])
+
+# Prediction Interface
+st.markdown("---")
+st.header("🔮 Make Prediction")
+
+with st.form("prediction_form"):
+    st.subheader("Enter Transaction Details")
+    
+    input_values = {}
+    
+    # Create two columns for layout
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**💰 Transaction Info**")
+        
+        input_values['transaction_id'] = st.number_input(
+            "Transaction ID",
+            min_value=1,
+            value=100000,
+            step=1
+        )
+        
+        input_values['customer_id'] = st.number_input(
+            "Customer ID",
+            min_value=1000,
+            value=2000,
+            step=1
+        )
+        
+        input_values['merchant_id'] = st.number_input(
+            "Merchant ID",
+            min_value=2000,
+            value=2050,
+            step=1
+        )
+        
+        input_values['amount'] = st.number_input(
+            "Transaction Amount",
+            min_value=0.0,
+            max_value=100000.0,
+            value=1000.0,
+            step=10.0
+        )
+        
+        input_values['transaction_date'] = st.text_input(
+            "Transaction Date (MM/DD/YYYY or YYYY-MM-DD)",
+            value=datetime.now().strftime("%m/%d/%Y")
+        )
+        
+        input_values['card_type'] = st.selectbox(
+            "Card Type",
+            options=card_type_options
+        )
+    
+    with col2:
+        st.markdown("**👤 Customer & Location Info**")
+        
+        input_values['location'] = st.selectbox(
+            "Transaction Location",
+            options=location_options
+        )
+        
+        input_values['purchase_category'] = st.selectbox(
+            "Purchase Category",
+            options=purchase_category_options
+        )
+        
+        input_values['customer_age'] = st.number_input(
+            "Customer Age",
+            min_value=18,
+            max_value=100,
+            value=35
+        )
+        
+        input_values['fraud_type'] = st.selectbox(
+            "Fraud Type (for reference)",
+            options=fraud_type_options,
+            help="This is typically unknown during prediction, but required by the model"
+        )
+    
+    submitted = st.form_submit_button("🔍 Predict", use_container_width=True, type="primary")
+
+if submitted:
+    try:
+        # Create base dataframe with exact column names from your dataset
+        X_base = pd.DataFrame([{
+            'transaction_id': input_values['transaction_id'],
+            'customer_id': input_values['customer_id'],
+            'merchant_id': input_values['merchant_id'],
+            'amount': input_values['amount'],
+            'transaction_date': input_values['transaction_date'],
+            'card_type': input_values['card_type'],
+            'location': input_values['location'],
+            'purchase_category': input_values['purchase_category'],
+            'customer_age': input_values['customer_age'],
+            'fraud_type': input_values['fraud_type']
+        }])
+        
+        with st.spinner("Engineering features and analyzing transaction..."):
+            # Engineer features
+            X_engineered = engineer_features(X_base, df)
+            
+            # Show all columns for debugging
+            with st.expander("🔧 All Features (Debug)", expanded=False):
+                st.write("**Available columns:**")
+                st.write(list(X_engineered.columns))
+                st.dataframe(X_engineered)
+            
+            # Make prediction
+            prediction = model.predict(X_engineered)[0]
+            
+            # Get probability if available
+            probability = None
+            if hasattr(model, "predict_proba"):
+                try:
+                    probs = model.predict_proba(X_engineered)[0]
+                    probability = float(probs[1]) if len(probs) > 1 else None
+                except:
+                    pass
+        
+        # Display results
+        st.markdown("---")
+        st.subheader("📊 Prediction Results")
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col2:
+            if int(prediction) == 1:
+                st.error("### ⚠️ FRAUD DETECTED")
+                if probability is not None:
+                    st.metric("Fraud Probability", f"{probability:.1%}")
+                st.warning("🚨 This transaction shows signs of fraudulent activity. Please review carefully.")
+            else:
+                st.success("### ✅ TRANSACTION SAFE")
+                if probability is not None:
+                    st.metric("Fraud Probability", f"{probability:.1%}")
+                st.info("✓ This transaction appears to be legitimate.")
+        
+        # Show input summary
+        with st.expander("📝 Input Summary", expanded=False):
+            st.json(input_values)
+            
+    except Exception as e:
+        st.error(f"❌ Prediction failed: {str(e)}")
+        with st.expander("🔧 Error Details", expanded=True):
+            st.code(traceback.format_exc())
+            st.warning("""
+            **Troubleshooting:**
+            - Check if dataset has 'is_fraud' column for fraud rate calculations
+            - Verify all column names match the training data
+            - Ensure date format is correct (MM/DD/YYYY or YYYY-MM-DD)
+            """)
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666; padding: 20px;'>
+    <p>🛡️ Fraud Detection System | Built with Streamlit</p>
+    <p style='font-size: 0.8rem;'>Includes automatic feature engineering</p>
+</div>
+""", unsafe_allow_html=True)
