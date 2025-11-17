@@ -80,131 +80,109 @@ def find_data_file():
 
 @st.cache_resource
 def load_model(path):
-    """Load model with enhanced compatibility"""
+    """Load model with joblib or pickle with multiple encoding attempts"""
     import sys
-    import io
     
-    # Method 1: Joblib
+    # Try joblib first
     try:
         model = joblib.load(path)
         st.success("✅ Model loaded with joblib")
         return model, "joblib"
-    except Exception as e:
-        st.warning(f"⚠️ Joblib failed: {str(e)}")
+    except Exception as joblib_error:
+        st.warning(f"⚠️ Joblib failed, trying pickle methods...")
     
-    # Method 2: Pickle with fix_imports and latin1 (Python 2 → 3 fix)
+    # Try pickle with fix_imports and latin1 (MAIN FIX)
     try:
         with open(path, "rb") as f:
-            # Read file content
-            content = f.read()
-            # Replace STACK_GLOBAL opcode
-            content = content.replace(b'STACK_GLOBAL', b'GLOBAL')
-            # Load from modified content
-            model = pickle.loads(content, fix_imports=True, encoding='latin1')
-        st.success("✅ Model loaded with pickle (STACK_GLOBAL fix)")
-        return model, "pickle (STACK_GLOBAL fix)"
-    except Exception as e:
-        st.warning(f"⚠️ STACK_GLOBAL fix failed: {str(e)}")
+            model = pickle.load(f, fix_imports=True, encoding='latin1')
+        st.success("✅ Model loaded with pickle (latin1 + fix_imports)")
+        return model, "pickle (latin1 + fix_imports)"
+    except Exception as fix_error:
+        st.warning(f"⚠️ Pickle with fix_imports failed")
     
-    # Method 3: Use pickle5 for Python 2 pickles
-    try:
-        import pickle5
-        with open(path, "rb") as f:
-            model = pickle5.load(f)
-        st.success("✅ Model loaded with pickle5")
-        return model, "pickle5"
-    except ImportError:
-        st.info("💡 Install pickle5: pip install pickle5")
-    except Exception as e:
-        st.warning(f"⚠️ Pickle5 failed: {str(e)}")
-    
-    # Method 4: Pickle with latin1
+    # Try pickle with latin1 encoding only
     try:
         with open(path, "rb") as f:
             model = pickle.load(f, encoding='latin1')
         st.success("✅ Model loaded with pickle (latin1)")
         return model, "pickle (latin1)"
-    except Exception as e:
-        st.warning(f"⚠️ Latin1 failed: {str(e)}")
+    except Exception as latin1_error:
+        st.warning(f"⚠️ Pickle with latin1 failed")
     
-    # All methods failed
+    # Try pickle with bytes encoding
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f, encoding='bytes')
+        st.success("✅ Model loaded with pickle (bytes)")
+        return model, "pickle (bytes)"
+    except Exception as bytes_error:
+        st.warning(f"⚠️ Pickle with bytes failed")
+    
+    # Try standard pickle
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f)
+        st.success("✅ Model loaded with pickle (default)")
+        return model, "pickle (default)"
+    except Exception as default_error:
+        pass
+    
+    # If all methods fail
     st.error("❌ All loading methods failed!")
-    st.error("**You MUST retrain and save the model using Python 3**")
+    st.error("**Solution:** You need to retrain and save your model using the same Python version as the deployment environment.")
     
-    with st.expander("🔧 SOLUTION: Retrain Your Model", expanded=True):
+    with st.expander("🔧 How to Fix This"):
         st.markdown("""
-        ### The model was saved in Python 2. You need to retrain it in Python 3.
+        ### The model file is incompatible. Here's how to fix it:
         
-        **Run this script locally with Python 3:**
-```python
-        import pandas as pd
-        import joblib
-        from sklearn.ensemble import RandomForestClassifier
-        from sklearn.model_selection import train_test_split
-        from sklearn.preprocessing import LabelEncoder
-        import numpy as np
+        **Option 1: Retrain the model (Recommended)**
         
-        # Load your dataset
-        df = pd.read_csv('FRAUD DETECTION.csv')
-        
-        # Check target column name (adjust if needed)
-        target_col = 'is_fraud'  # or 'fraud', 'Is_Fraud', etc.
-        
-        if target_col not in df.columns:
-            print("Available columns:", df.columns.tolist())
-            # Find the fraud column
-            for col in df.columns:
-                if 'fraud' in col.lower():
-                    target_col = col
-                    break
-        
-        print(f"Using target column: {target_col}")
-        
-        # Separate features and target
-        X = df.drop(target_col, axis=1)
-        y = df[target_col]
-        
-        # Encode categorical variables
-        for col in X.select_dtypes(include=['object']).columns:
-            le = LabelEncoder()
-            X[col] = le.fit_transform(X[col].astype(str))
-        
-        # Handle any remaining non-numeric data
-        X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
-        
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
-        
-        # Train model
-        print("Training model...")
-        model = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=10,
-            random_state=42,
-            n_jobs=-1
-        )
-        model.fit(X_train, y_train)
-        
-        # Evaluate
-        accuracy = model.score(X_test, y_test)
-        print(f"Model accuracy: {accuracy:.2%}")
-        
-        # Save with joblib (Python 3 compatible)
-        joblib.dump(model, 'fraud_detector_final.pkl', compress=3)
-        print("✅ Model saved successfully!")
-        print(f"Model expects {len(X.columns)} features")
-        print(f"Features: {X.columns.tolist()}")
-```
-        
-        **Then:**
-        1. Upload the new `fraud_detector_final.pkl` to your deployment
-        2. Restart the Streamlit app
+        Run this script locally to retrain your model:
         """)
+        
+        st.code("""
+import pandas as pd
+import joblib
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+
+# Load dataset
+df = pd.read_csv('FRAUD DETECTION.csv')
+
+# Prepare data
+target_col = 'is_fraud'  # Adjust to your target column
+X = df.drop(target_col, axis=1)
+y = df[target_col]
+
+# Encode categorical variables
+for col in X.select_dtypes(include=['object']).columns:
+    le = LabelEncoder()
+    X[col] = le.fit_transform(X[col].astype(str))
+
+# Train model
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+model.fit(X_train, y_train)
+
+# Save with joblib (more reliable)
+joblib.dump(model, 'fraud_detector_final.pkl')
+print(f"Model accuracy: {model.score(X_test, y_test):.2%}")
+        """, language="python")
+        
+        st.markdown("""
+        **Option 2: Convert existing model**
+        
+        If you have the original training script, re-run it and save with:
+        """)
+        
+        st.code("""
+joblib.dump(model, 'fraud_detector_final.pkl', compress=3)
+        """, language="python")
+        
+        st.markdown("Then push the new model file to GitHub.")
     
     return None, None
-```
 
 Also add this to your `requirements.txt`:
 ```
