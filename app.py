@@ -80,18 +80,106 @@ def find_data_file():
 
 @st.cache_resource
 def load_model(path):
-    """Load model with joblib or pickle"""
+    """Load model with joblib or pickle with multiple encoding attempts"""
+    import sys
+    
+    # Try joblib first
     try:
         model = joblib.load(path)
+        st.success("✅ Model loaded with joblib")
         return model, "joblib"
-    except Exception:
-        try:
-            with open(path, "rb") as f:
-                model = pickle.load(f)
-            return model, "pickle"
-        except Exception as e:
-            st.error(f"Failed to load model: {e}")
-            return None, None
+    except Exception as joblib_error:
+        st.warning(f"⚠️ Joblib failed, trying pickle methods...")
+    
+    # Try pickle with fix_imports and latin1 (MAIN FIX)
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f, fix_imports=True, encoding='latin1')
+        st.success("✅ Model loaded with pickle (latin1 + fix_imports)")
+        return model, "pickle (latin1 + fix_imports)"
+    except Exception as fix_error:
+        st.warning(f"⚠️ Pickle with fix_imports failed")
+    
+    # Try pickle with latin1 encoding only
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f, encoding='latin1')
+        st.success("✅ Model loaded with pickle (latin1)")
+        return model, "pickle (latin1)"
+    except Exception as latin1_error:
+        st.warning(f"⚠️ Pickle with latin1 failed")
+    
+    # Try pickle with bytes encoding
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f, encoding='bytes')
+        st.success("✅ Model loaded with pickle (bytes)")
+        return model, "pickle (bytes)"
+    except Exception as bytes_error:
+        st.warning(f"⚠️ Pickle with bytes failed")
+    
+    # Try standard pickle
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f)
+        st.success("✅ Model loaded with pickle (default)")
+        return model, "pickle (default)"
+    except Exception as default_error:
+        pass
+    
+    # If all methods fail
+    st.error("❌ All loading methods failed!")
+    st.error("**Solution:** You need to retrain and save your model using the same Python version as the deployment environment.")
+    
+    with st.expander("🔧 How to Fix This"):
+        st.markdown("""
+        ### The model file is incompatible. Here's how to fix it:
+        
+        **Option 1: Retrain the model (Recommended)**
+        
+        Run this script locally to retrain your model:
+        
+        ```python
+        import pandas as pd
+        import joblib
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.model_selection import train_test_split
+        from sklearn.preprocessing import LabelEncoder
+        
+        # Load dataset
+        df = pd.read_csv('FRAUD DETECTION.csv')
+        
+        # Prepare data
+        target_col = 'is_fraud'  # Adjust to your target column
+        X = df.drop(target_col, axis=1)
+        y = df[target_col]
+        
+        # Encode categorical variables
+        for col in X.select_dtypes(include=['object']).columns:
+            le = LabelEncoder()
+            X[col] = le.fit_transform(X[col].astype(str))
+        
+        # Train model
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+        model.fit(X_train, y_train)
+        
+        # Save with joblib (more reliable)
+        joblib.dump(model, 'fraud_detector_final.pkl')
+        print(f"Model accuracy: {model.score(X_test, y_test):.2%}")
+        ```
+        
+        **Option 2: Convert existing model**
+        
+        If you have the original training script, re-run it and save with:
+        ```python
+        joblib.dump(model, 'fraud_detector_final.pkl', compress=3)
+        ```
+        
+        Then push the new model file to GitHub.
+        """)
+    
+    return None, None
 
 @st.cache_data
 def load_dataset(path, ext):
