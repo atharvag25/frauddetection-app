@@ -81,8 +81,6 @@ def find_data_file():
 @st.cache_resource
 def load_model(path):
     """Load model with joblib or pickle with multiple encoding attempts"""
-    import sys
-    
     # Try joblib first
     try:
         model = joblib.load(path)
@@ -91,7 +89,7 @@ def load_model(path):
     except Exception as joblib_error:
         st.warning(f"⚠️ Joblib failed, trying pickle methods...")
     
-    # Try pickle with fix_imports and latin1 (MAIN FIX)
+    # Try pickle with fix_imports and latin1
     try:
         with open(path, "rb") as f:
             model = pickle.load(f, fix_imports=True, encoding='latin1')
@@ -129,19 +127,13 @@ def load_model(path):
     
     # If all methods fail
     st.error("❌ All loading methods failed!")
-    st.error("**Solution:** You need to retrain and save your model using the same Python version as the deployment environment.")
+    st.error("**Solution:** You need to retrain and save your model using Python 3.")
     
     with st.expander("🔧 How to Fix This"):
-        st.markdown("""
-        ### The model file is incompatible. Here's how to fix it:
+        st.write("The model file is incompatible. You need to retrain it.")
+        st.write("**Step 1:** Run this Python script locally:")
         
-        **Option 1: Retrain the model (Recommended)**
-        
-        Run this script locally to retrain your model:
-        """)
-        
-        st.code("""
-import pandas as pd
+        retraining_code = '''import pandas as pd
 import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
@@ -151,7 +143,7 @@ from sklearn.preprocessing import LabelEncoder
 df = pd.read_csv('FRAUD DETECTION.csv')
 
 # Prepare data
-target_col = 'is_fraud'  # Adjust to your target column
+target_col = 'is_fraud'
 X = df.drop(target_col, axis=1)
 y = df[target_col]
 
@@ -165,28 +157,15 @@ model = RandomForestClassifier(n_estimators=100, random_state=42)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
 model.fit(X_train, y_train)
 
-# Save with joblib (more reliable)
+# Save with joblib
 joblib.dump(model, 'fraud_detector_final.pkl')
-print(f"Model accuracy: {model.score(X_test, y_test):.2%}")
-        """, language="python")
+print(f"Model accuracy: {model.score(X_test, y_test):.2%}")'''
         
-        st.markdown("""
-        **Option 2: Convert existing model**
-        
-        If you have the original training script, re-run it and save with:
-        """)
-        
-        st.code("""
-joblib.dump(model, 'fraud_detector_final.pkl', compress=3)
-        """, language="python")
-        
-        st.markdown("Then push the new model file to GitHub.")
+        st.code(retraining_code, language='python')
+        st.write("**Step 2:** Upload the new model file to your repository")
     
     return None, None
 
-Also add this to your `requirements.txt`:
-```
-pickle5
 @st.cache_data
 def load_dataset(path, ext):
     """Load CSV or Excel dataset"""
@@ -210,10 +189,7 @@ def calculate_fraud_rates(df, column, target='is_fraud'):
     return fraud_rates
 
 def engineer_features(input_data, df=None):
-    """
-    Create all engineered features that the model expects
-    Based on your dataset structure
-    """
+    """Create all engineered features that the model expects"""
     data = input_data.copy()
     
     # Extract datetime features if transaction_date exists
@@ -224,7 +200,6 @@ def engineer_features(input_data, df=None):
         data['is_weekend'] = (data['tx_weekday'] >= 5).astype(int)
         data['is_night'] = ((data['tx_hour'] >= 22) | (data['tx_hour'] <= 6)).astype(int)
     else:
-        # Use defaults if no date column
         data['tx_hour'] = 12
         data['tx_weekday'] = 2
         data['is_weekend'] = 0
@@ -238,21 +213,18 @@ def engineer_features(input_data, df=None):
     
     # Calculate fraud rates from training data
     if df is not None:
-        # Purchase category fraud rate
         if 'purchase_category' in data.columns and 'purchase_category' in df.columns:
             fraud_rates = calculate_fraud_rates(df, 'purchase_category')
             data['purchase_category_fraud_rate'] = data['purchase_category'].map(fraud_rates).fillna(0.5)
         else:
             data['purchase_category_fraud_rate'] = 0.5
         
-        # Location fraud rate
         if 'location' in data.columns and 'location' in df.columns:
             fraud_rates = calculate_fraud_rates(df, 'location')
             data['location_fraud_rate'] = data['location'].map(fraud_rates).fillna(0.5)
         else:
             data['location_fraud_rate'] = 0.5
     else:
-        # Use default values if no training data available
         data['purchase_category_fraud_rate'] = 0.5
         data['location_fraud_rate'] = 0.5
     
@@ -295,7 +267,7 @@ if model_path and model_path.exists():
 else:
     st.error(f"❌ Model not found. Please place `{MODEL_BASENAME}.pkl` or `.joblib` in: {Path.cwd()}")
 
-# Load dataset (for fraud rate calculations and getting unique values)
+# Load dataset
 data_path, data_ext = find_data_file()
 df = None
 
@@ -324,7 +296,7 @@ def get_unique_values(df, column, default_values):
         return sorted([str(v) for v in unique_vals])
     return default_values
 
-# Define options based on your dataset
+# Define options
 card_type_options = get_unique_values(df, 'card_type', ['Rupay', 'MasterCard', 'Visa'])
 location_options = get_unique_values(df, 'location', ['Bangalore', 'Surat', 'Hyderabad', 'Mumbai', 'Kolkata', 'Jaipur', 'Delhi', 'Chennai', 'Pune', 'Ahmedabad'])
 purchase_category_options = get_unique_values(df, 'purchase_category', ['POS', 'Digital'])
@@ -339,7 +311,6 @@ with st.form("prediction_form"):
     
     input_values = {}
     
-    # Create two columns for layout
     col1, col2 = st.columns(2)
     
     with col1:
@@ -407,14 +378,14 @@ with st.form("prediction_form"):
         input_values['fraud_type'] = st.selectbox(
             "Fraud Type (for reference)",
             options=fraud_type_options,
-            help="This is typically unknown during prediction, but required by the model"
+            help="This is typically unknown during prediction"
         )
     
     submitted = st.form_submit_button("🔍 Predict", use_container_width=True, type="primary")
 
 if submitted:
     try:
-        # Create base dataframe with exact column names from your dataset
+        # Create base dataframe
         X_base = pd.DataFrame([{
             'transaction_id': input_values['transaction_id'],
             'customer_id': input_values['customer_id'],
@@ -432,7 +403,7 @@ if submitted:
             # Engineer features
             X_engineered = engineer_features(X_base, df)
             
-            # Show all columns for debugging
+            # Show features for debugging
             with st.expander("🔧 All Features (Debug)", expanded=False):
                 st.write("**Available columns:**")
                 st.write(list(X_engineered.columns))
@@ -478,9 +449,9 @@ if submitted:
             st.code(traceback.format_exc())
             st.warning("""
             **Troubleshooting:**
-            - Check if dataset has 'is_fraud' column for fraud rate calculations
-            - Verify all column names match the training data
-            - Ensure date format is correct (MM/DD/YYYY or YYYY-MM-DD)
+            - Check if dataset has 'is_fraud' column
+            - Verify column names match training data
+            - Ensure date format is correct
             """)
 
 # Footer
