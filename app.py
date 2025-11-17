@@ -446,7 +446,7 @@ with st.form("prediction_form"):
         input_values['amount'] = st.number_input(
             "Transaction Amount",
             min_value=0.0,
-            max_value=1000000.0,
+            max_value=100000.0,
             value=1000.0,
             step=10.0
         )
@@ -489,12 +489,9 @@ with st.form("prediction_form"):
 
     submitted = st.form_submit_button("🔍 Predict", use_container_width=True, type="primary")
 
-# ======= REPLACE existing `if submitted:` block with this =======
-FRAUD_THRESHOLD = 0.5  # change to 0.3 or 0.4 to be more sensitive
-
 if submitted:
     try:
-        # Build input dataframe
+        # Create base dataframe with exact column names from your dataset
         X_base = pd.DataFrame([{
             'transaction_id': input_values['transaction_id'],
             'customer_id': input_values['customer_id'],
@@ -508,132 +505,47 @@ if submitted:
             'fraud_type': input_values['fraud_type']
         }])
 
-        with st.spinner("Engineering features and preparing input..."):
+        with st.spinner("Engineering features and analyzing transaction..."):
+            # Engineer features
             X_engineered = engineer_features(X_base, df)
 
-            # Debug: show engineered features
-            with st.expander("🔧 All Features (Debug)", expanded=True):
-                st.write("**Available columns in engineered input:**")
+            # Show all columns for debugging
+            with st.expander("🔧 All Features (Debug)", expanded=False):
+                st.write("**Available columns:**")
                 st.write(list(X_engineered.columns))
                 st.dataframe(X_engineered)
 
-            # Diagnostics: model expectations
-            model_expected = None
-            model_feature_source = None
+            # Make prediction
             try:
-                # 1) Common sklearn attribute
-                if hasattr(model, "feature_names_in_"):
-                    model_expected = list(model.feature_names_in_)
-                    model_feature_source = "model.feature_names_in_"
-                else:
-                    # 2) If model is a Pipeline, attempt to find final estimator's feature_names_in_
-                    if hasattr(model, "named_steps"):
-                        for name, step in model.named_steps.items():
-                            if hasattr(step, "feature_names_in_"):
-                                model_expected = list(step.feature_names_in_)
-                                model_feature_source = f"pipeline.named_steps['{name}'].feature_names_in_"
-                                break
-                # 3) If we still don't have expected feature names, try attribute 'columns' for DataFrame transformers
-            except Exception:
-                model_expected = None
-                model_feature_source = None
+                prediction = model.predict(X_engineered)[0]
+            except Exception as e:
+                raise RuntimeError(f"Model prediction failed. Check feature names & preprocessing. Details: {e}")
 
-            # Show model diagnostics in expander
-            with st.expander("🧾 Model Diagnostics", expanded=True):
+            # Get probability if available
+            probability = None
+            if hasattr(model, "predict_proba"):
                 try:
-                    st.write("Model type:", type(model))
-                    if hasattr(model, "classes_"):
-                        st.write("Model classes_:", getattr(model, "classes_"))
-                    if model_expected:
-                        st.write(f"Model expected features (source: {model_feature_source}):")
-                        st.write(model_expected)
-                        # Attempt to align columns
-                        missing = [c for c in model_expected if c not in X_engineered.columns]
-                        extra = [c for c in X_engineered.columns if c not in model_expected]
-                        st.write("Missing from input (will be filled with 0):", missing)
-                        st.write("Extra columns in input (kept):", extra)
-                    else:
-                        st.write("Model does not expose `feature_names_in_` — cannot auto-align.")
-                except Exception as ex_diag:
-                    st.write("Diagnostics error:", str(ex_diag))
+                    probs = model.predict_proba(X_engineered)[0]
+                    probability = float(probs[1]) if len(probs) > 1 else None
+                except Exception:
+                    pass
 
-            # If we have expected feature names, reindex X_engineered to match (fill missing with 0)
-            if model_expected:
-                # preserve original X_engineered copy for display
-                X_for_model = X_engineered.reindex(columns=model_expected, fill_value=0)
-            else:
-                # no guidance — send the engineered table as-is
-                X_for_model = X_engineered.copy()
-
-            # show the final DataFrame passed to model (for debugging)
-            with st.expander("🧪 Final input passed to model", expanded=False):
-                st.write("Columns passed to model (in order):")
-                st.write(list(X_for_model.columns))
-                st.dataframe(X_for_model)
-
-            # Attempt prediction: prefer predict, fall back to predict_proba or decision_function
-            label = None
-            prob = None
-            pred_exception = None
-
-            # 1) Try model.predict
-            if hasattr(model, "predict"):
-                try:
-                    pred = model.predict(X_for_model)
-                    label = int(pred[0])
-                except Exception as e:
-                    pred_exception = e
-                    label = None
-
-            # 2) If predict failed or not available, try predict_proba
-            if label is None and hasattr(model, "predict_proba"):
-                try:
-                    probs = model.predict_proba(X_for_model)[0]
-                    # assume index 1 corresponds to fraud if classes_ = [0,1]
-                    if hasattr(model, "classes_"):
-                        classes = list(getattr(model, "classes_"))
-                        # try to find index of class '1' or 'fraud' - fallback to index 1
-                        if 1 in classes:
-                            idx = classes.index(1)
-                        elif "fraud" in classes:
-                            idx = classes.index("fraud")
-                        else:
-                            idx = 1 if len(probs) > 1 else 0
-                    else:
-                        idx = 1 if len(probs) > 1 else 0
-                    prob = float(probs[idx])
-                    label = 1 if prob >= FRAUD_THRESHOLD else 0
-                except Exception as e:
-                    pred_exception = e
-                    label = None
-
-            # 3) If still not determined, try decision_function
-            if label is None and hasattr(model, "decision_function"):
-                try:
-                    score = model.decision_function(X_for_model)[0]
-                    # convert score to label with zero threshold (adjust if you want)
-                    label = 1 if score >= 0 else 0
-                except Exception as e:
-                    pred_exception = e
-                    label = None
-
-            if label is None:
-                raise RuntimeError(f"Model prediction failed. Last error: {pred_exception}")
-
-        # Display results (binary decision only if you prefer)
+        # Display results
         st.markdown("---")
         st.subheader("📊 Prediction Results")
 
         col1, col2, col3 = st.columns([1, 2, 1])
+
         with col2:
-            # Show probability only for debugging; remove later if you want pure label
-            if prob is not None:
-                st.write(f"Fraud probability (used threshold {FRAUD_THRESHOLD}): **{prob:.2%}**")
-            if int(label) == 1:
+            if int(prediction) == 1:
                 st.error("### ⚠️ FRAUD DETECTED")
+                if probability is not None:
+                    st.metric("Fraud Probability", f"{probability:.1%}")
                 st.warning("🚨 This transaction shows signs of fraudulent activity. Please review carefully.")
             else:
                 st.success("### ✅ TRANSACTION SAFE")
+                if probability is not None:
+                    st.metric("Fraud Probability", f"{probability:.1%}")
                 st.info("✓ This transaction appears to be legitimate.")
 
         # Show input summary
@@ -645,14 +557,13 @@ if submitted:
         with st.expander("🔧 Error Details", expanded=True):
             st.code(traceback.format_exc())
             st.warning("""
-            Troubleshooting tips:
-            - If model expects preprocessed features (scaled/encoded), you must apply the *same* preprocessing before prediction.
-            - If the model exposes `feature_names_in_`, ensure the engineered features match those names and dtypes.
-            - If `predict_proba` shows low probability even for extreme inputs, try lowering FRAUD_THRESHOLD (e.g., 0.3).
-            - If your model uses a sklearn Pipeline with internal ColumnTransformer, prefer saving/loading the entire pipeline so preprocessing is included.
+            **Troubleshooting:**
+            - Check if dataset has 'is_fraud' column for fraud rate calculations
+            - Verify all column names match the training data (feature names & preprocessing)
+            - Ensure date format is correct (MM/DD/YYYY or YYYY-MM-DD)
+            - If model expects scaled/encoded features, you must apply same preprocessing before prediction
+            - If unpickling fails due to sklearn internals, run the app with the scikit-learn version used to train the model.
             """)
-# ======= end replacement block =======
-
 
 # Footer
 st.markdown("---")
