@@ -30,11 +30,11 @@ st.set_page_config(
 st.markdown("""
     <style>
     .main-header {
-        font-size: 2.5rem;
+        font-size: 2.2rem;
         font-weight: bold;
         color: #1f77b4;
         text-align: center;
-        margin-bottom: 2rem;
+        margin-bottom: 1rem;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -47,6 +47,7 @@ MODEL_EXT_CANDIDATES = [".pkl", ".joblib"]
 DATA_BASENAME = "FRAUD DETECTION"
 DATA_EXT_CANDIDATES = [".csv", ".xlsx", ".xls"]
 
+# ====== Helper functions ======
 def get_file_list():
     """Get list of files in current directory (string names)."""
     try:
@@ -131,7 +132,6 @@ def analyze_unpickle_error_message(msg: str):
     Returns a list of (module_name, class_name) guesses to attempt injection.
     """
     results = []
-    # common pattern from traceback: "Can't get attribute '_RemainderColsList' on <module 'sklearn.compose._column_transformer' ..."
     m = re.search(r"Can't get attribute '([^']+)' on <module '([^']+)'", msg)
     if m:
         cls = m.group(1)
@@ -139,10 +139,8 @@ def analyze_unpickle_error_message(msg: str):
         results.append((mod, cls))
         return results
 
-    # other pickle AttributeError formats, fallback: look for names starting with underscore from sklearn
     names = re.findall(r"_\w{3,}", msg)
     for name in set(names):
-        # if it's sklearn related, try injecting into common sklearn modules
         candidates = [
             "sklearn.compose._column_transformer",
             "sklearn.compose._data",
@@ -159,16 +157,13 @@ def load_model_from_path(path: Path):
     Load model from a Path using joblib or pickle.
     Attempts to monkeypatch missing classes if unpickling fails with AttributeError.
     """
-    # Try joblib.load first (fast and common)
     last_exc = None
     try:
         model = joblib.load(path)
         return model, "joblib"
     except Exception as e:
         last_exc = e
-        # Fall through to more advanced handling below
 
-    # Attempt to detect missing-class message and inject stubs
     msg = "".join(traceback.format_exception_only(type(last_exc), last_exc))
     candidates = analyze_unpickle_error_message(msg)
 
@@ -177,7 +172,6 @@ def load_model_from_path(path: Path):
         injected = try_inject_stub_class(mod, cls)
         injected_any = injected_any or injected
 
-    # If we injected stubs, try loading again with joblib then pickle
     if injected_any:
         try:
             model = joblib.load(path)
@@ -185,13 +179,11 @@ def load_model_from_path(path: Path):
         except Exception as e2:
             last_exc = e2
 
-    # Last attempt: try pickle directly (some joblib files are pickles)
     try:
         with open(path, "rb") as f:
             model = pickle.load(f)
         return model, "pickle"
     except Exception as e3:
-        # If we get here, everything failed. Provide helpful guidance.
         full_msg = "".join(traceback.format_exception(type(e3), e3, e3.__traceback__))
         hint = (
             "Model loading failed. Common cause: scikit-learn version mismatch between training and serving "
@@ -291,7 +283,7 @@ def engineer_features(input_data, df=None):
 
     return data
 
-# Sidebar
+# ====== Sidebar: Debug, instructions and model upload + threshold UI ======
 with st.sidebar:
     st.header("📊 System Information")
 
@@ -328,7 +320,18 @@ with st.sidebar:
         if model_url and requests is None:
             st.warning("`requests` not available in environment. To enable URL download, add `requests` to requirements.txt.")
 
-# --- Load model logic: prefer uploaded file, then URL, then repo/workdir ---
+    st.markdown("---")
+
+    # ===== Threshold control in the sidebar =====
+    st.markdown("### ⚖️ Decision Threshold & Display")
+    FRAUD_THRESHOLD = st.slider(
+        "Fraud Threshold (probability >= threshold → FRAUD)",
+        min_value=0.0, max_value=1.0, value=0.50, step=0.01
+    )
+    show_probability = st.checkbox("Show probability in results", value=True)
+    st.caption("Lower the threshold to mark more transactions as fraud (more false positives).")
+
+# ====== Load model logic: prefer uploaded file, then URL, then repo/workdir ======
 model = None
 model_method = None
 model_path = None
@@ -367,12 +370,11 @@ else:
             model, model_method = load_model_from_path(model_path)
             st.info(f"📦 Loaded using: **{model_method}**")
         except Exception as e:
-            # load_model_from_path raises helpful RuntimeError with guidance
             st.error("Failed to load model from path: see details below.")
             with st.expander("Model load error", expanded=True):
                 st.text(str(e))
 
-# Load dataset (for fraud rate calculations and getting unique values)
+# ====== Load dataset (for fraud rate calculations and getting unique values) ======
 data_path, data_ext = find_data_file()
 df = None
 
@@ -407,7 +409,7 @@ location_options = get_unique_values(df, 'location', ['Bangalore', 'Surat', 'Hyd
 purchase_category_options = get_unique_values(df, 'purchase_category', ['POS', 'Digital'])
 fraud_type_options = get_unique_values(df, 'fraud_type', ['Identity theft', 'Malware', 'Payment card fraud', 'scam', 'phishing'])
 
-# Prediction Interface
+# ====== Prediction Interface ======
 st.markdown("---")
 st.header("🔮 Make Prediction")
 
@@ -443,16 +445,16 @@ with st.form("prediction_form"):
             step=1
         )
 
+        # Allow unlimited maximum amount (remove max_value)
         input_values['amount'] = st.number_input(
             "Transaction Amount",
             min_value=0.0,
-            max_value=100000.0,
             value=1000.0,
             step=10.0
         )
 
         input_values['transaction_date'] = st.text_input(
-            "Transaction Date (MM/DD/YYYY or YYYY-MM-DD)",
+            "Transaction Date (MM/DD/YYYY or YYYY-MM-DD or MM/DD/YYYY HH:MM)",
             value=datetime.now().strftime("%m/%d/%Y")
         )
 
@@ -489,9 +491,10 @@ with st.form("prediction_form"):
 
     submitted = st.form_submit_button("🔍 Predict", use_container_width=True, type="primary")
 
+# ====== Prediction & result handling (uses sidebar FRAUD_THRESHOLD) ======
 if submitted:
     try:
-        # Create base dataframe with exact column names from your dataset
+        # Build input dataframe
         X_base = pd.DataFrame([{
             'transaction_id': input_values['transaction_id'],
             'customer_id': input_values['customer_id'],
@@ -505,47 +508,118 @@ if submitted:
             'fraud_type': input_values['fraud_type']
         }])
 
-        with st.spinner("Engineering features and analyzing transaction..."):
-            # Engineer features
+        with st.spinner("Engineering features and preparing input..."):
             X_engineered = engineer_features(X_base, df)
 
-            # Show all columns for debugging
+            # Debug: show engineered features
             with st.expander("🔧 All Features (Debug)", expanded=False):
-                st.write("**Available columns:**")
+                st.write("**Available columns in engineered input:**")
                 st.write(list(X_engineered.columns))
                 st.dataframe(X_engineered)
 
-            # Make prediction
+            # Diagnostics: model expectations (optional)
+            model_expected = None
+            model_feature_source = None
             try:
-                prediction = model.predict(X_engineered)[0]
-            except Exception as e:
-                raise RuntimeError(f"Model prediction failed. Check feature names & preprocessing. Details: {e}")
+                if hasattr(model, "feature_names_in_"):
+                    model_expected = list(model.feature_names_in_)
+                    model_feature_source = "model.feature_names_in_"
+                else:
+                    if hasattr(model, "named_steps"):
+                        for name, step in model.named_steps.items():
+                            if hasattr(step, "feature_names_in_"):
+                                model_expected = list(step.feature_names_in_)
+                                model_feature_source = f"pipeline.named_steps['{name}'].feature_names_in_"
+                                break
+            except Exception:
+                model_expected = None
+                model_feature_source = None
 
-            # Get probability if available
-            probability = None
+            with st.expander("🧾 Model Diagnostics", expanded=False):
+                try:
+                    st.write("Model type:", type(model))
+                    if hasattr(model, "classes_"):
+                        st.write("Model classes_:", getattr(model, "classes_"))
+                    if model_expected:
+                        st.write(f"Model expected features (source: {model_feature_source}):")
+                        st.write(model_expected)
+                        missing = [c for c in model_expected if c not in X_engineered.columns]
+                        extra = [c for c in X_engineered.columns if c not in model_expected]
+                        st.write("Missing from input (will be filled with 0):", missing)
+                        st.write("Extra columns in input (kept):", extra)
+                    else:
+                        st.write("Model does not expose `feature_names_in_` — cannot auto-align.")
+                except Exception as ex_diag:
+                    st.write("Diagnostics error:", str(ex_diag))
+
+            # Align to expected features if present
+            if model_expected:
+                X_for_model = X_engineered.reindex(columns=model_expected, fill_value=0)
+            else:
+                X_for_model = X_engineered.copy()
+
+            with st.expander("🧪 Final input passed to model", expanded=False):
+                st.write("Columns passed to model (in order):")
+                st.write(list(X_for_model.columns))
+                st.dataframe(X_for_model)
+
+            # Prediction: try predict_proba -> threshold -> label, else fallback to predict
+            label = None
+            prob = None
+            pred_exception = None
+
             if hasattr(model, "predict_proba"):
                 try:
-                    probs = model.predict_proba(X_engineered)[0]
-                    probability = float(probs[1]) if len(probs) > 1 else None
-                except Exception:
-                    pass
+                    probs = model.predict_proba(X_for_model)[0]
+                    if hasattr(model, "classes_"):
+                        classes = list(getattr(model, "classes_"))
+                        if 1 in classes:
+                            idx = classes.index(1)
+                        elif "fraud" in classes:
+                            idx = classes.index("fraud")
+                        else:
+                            idx = 1 if len(probs) > 1 else 0
+                    else:
+                        idx = 1 if len(probs) > 1 else 0
+                    prob = float(probs[idx])
+                    label = 1 if prob >= FRAUD_THRESHOLD else 0
+                except Exception as e:
+                    pred_exception = e
+                    label = None
+
+            if label is None and hasattr(model, "predict"):
+                try:
+                    pred = model.predict(X_for_model)
+                    # try to convert to int label (works for 0/1 or similar)
+                    label = int(pred[0])
+                except Exception as e:
+                    pred_exception = e
+                    label = None
+
+            if label is None and hasattr(model, "decision_function"):
+                try:
+                    score = model.decision_function(X_for_model)[0]
+                    label = 1 if score >= 0 else 0
+                except Exception as e:
+                    pred_exception = e
+                    label = None
+
+            if label is None:
+                raise RuntimeError(f"Model prediction failed. Last error: {pred_exception}")
 
         # Display results
         st.markdown("---")
         st.subheader("📊 Prediction Results")
 
         col1, col2, col3 = st.columns([1, 2, 1])
-
         with col2:
-            if int(prediction) == 1:
+            if show_probability and prob is not None:
+                st.write(f"Fraud probability (used threshold {FRAUD_THRESHOLD:.2f}): **{prob:.2%}**")
+            if int(label) == 1:
                 st.error("### ⚠️ FRAUD DETECTED")
-                if probability is not None:
-                    st.metric("Fraud Probability", f"{probability:.1%}")
                 st.warning("🚨 This transaction shows signs of fraudulent activity. Please review carefully.")
             else:
                 st.success("### ✅ TRANSACTION SAFE")
-                if probability is not None:
-                    st.metric("Fraud Probability", f"{probability:.1%}")
                 st.info("✓ This transaction appears to be legitimate.")
 
         # Show input summary
@@ -557,19 +631,18 @@ if submitted:
         with st.expander("🔧 Error Details", expanded=True):
             st.code(traceback.format_exc())
             st.warning("""
-            **Troubleshooting:**
-            - Check if dataset has 'is_fraud' column for fraud rate calculations
-            - Verify all column names match the training data (feature names & preprocessing)
-            - Ensure date format is correct (MM/DD/YYYY or YYYY-MM-DD)
-            - If model expects scaled/encoded features, you must apply same preprocessing before prediction
-            - If unpickling fails due to sklearn internals, run the app with the scikit-learn version used to train the model.
+            Troubleshooting tips:
+            - Ensure the model includes preprocessing (preferred: save a full Pipeline).
+            - If model expects preprocessed features (scaled/encoded), apply same preprocessing before prediction.
+            - If model exposes `feature_names_in_`, ensure engineered features match those names and dtypes.
+            - Lower the FRAUD_THRESHOLD in the sidebar to increase sensitivity (more false positives).
             """)
 
-# Footer
+# ====== Footer ======
 st.markdown("---")
 st.markdown("""
-<div style='text-align: center; color: #666; padding: 20px;'>
+<div style='text-align: center; color: #666; padding: 12px;'>
     <p>🛡️ Fraud Detection System | Built with Streamlit</p>
-    <p style='font-size: 0.8rem;'>Includes automatic feature engineering and model upload fallback</p>
+    <p style='font-size: 0.8rem;'>Includes automatic feature engineering, model upload fallback and threshold control</p>
 </div>
 """, unsafe_allow_html=True)
