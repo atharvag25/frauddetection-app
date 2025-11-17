@@ -491,7 +491,7 @@ with st.form("prediction_form"):
 
 if submitted:
     try:
-        # Create base dataframe with exact column names from your dataset
+        # Build input dataframe exactly as before
         X_base = pd.DataFrame([{
             'transaction_id': input_values['transaction_id'],
             'customer_id': input_values['customer_id'],
@@ -506,49 +506,62 @@ if submitted:
         }])
 
         with st.spinner("Engineering features and analyzing transaction..."):
-            # Engineer features
             X_engineered = engineer_features(X_base, df)
 
-            # Show all columns for debugging
+            # Debug view of engineered features
             with st.expander("🔧 All Features (Debug)", expanded=False):
                 st.write("**Available columns:**")
                 st.write(list(X_engineered.columns))
                 st.dataframe(X_engineered)
 
-            # Make prediction
-            try:
-                prediction = model.predict(X_engineered)[0]
-            except Exception as e:
-                raise RuntimeError(f"Model prediction failed. Check feature names & preprocessing. Details: {e}")
+            # 1) Try to use model.predict if present
+            label = None
+            if hasattr(model, "predict"):
+                try:
+                    pred = model.predict(X_engineered)
+                    # Ensure we have a scalar/int label
+                    label = int(pred[0])
+                except Exception as e:
+                    # Fall back to predict_proba if predict fails
+                    label = None
 
-            # Get probability if available
-            probability = None
-            if hasattr(model, "predict_proba"):
+            # 2) If predict isn't available or failed, use predict_proba with threshold
+            if label is None and hasattr(model, "predict_proba"):
                 try:
                     probs = model.predict_proba(X_engineered)[0]
-                    probability = float(probs[1]) if len(probs) > 1 else None
+                    # choose class index 1 as "fraud" by convention; fallback threshold 0.5
+                    fraud_prob = float(probs[1]) if len(probs) > 1 else float(probs[0])
+                    label = 1 if fraud_prob >= 0.5 else 0
                 except Exception:
-                    pass
+                    label = None
 
-        # Display results
+            # 3) As a last resort, if the model exposes decision_function, convert it to label
+            if label is None and hasattr(model, "decision_function"):
+                try:
+                    score = model.decision_function(X_engineered)[0]
+                    # convert score to label with zero threshold (common for SVM-like)
+                    label = 1 if score >= 0 else 0
+                except Exception:
+                    label = None
+
+            # If still None, raise error
+            if label is None:
+                raise RuntimeError("Model does not support prediction via predict/predict_proba/decision_function.")
+
+        # Display results (only the binary decision)
         st.markdown("---")
         st.subheader("📊 Prediction Results")
 
         col1, col2, col3 = st.columns([1, 2, 1])
-
         with col2:
-            if int(prediction) == 1:
+            if int(label) == 1:
                 st.error("### ⚠️ FRAUD DETECTED")
-                if probability is not None:
-                    st.metric("Fraud Probability", f"{probability:.1%}")
                 st.warning("🚨 This transaction shows signs of fraudulent activity. Please review carefully.")
             else:
                 st.success("### ✅ TRANSACTION SAFE")
-                if probability is not None:
-                    st.metric("Fraud Probability", f"{probability:.1%}")
                 st.info("✓ This transaction appears to be legitimate.")
 
-        # Show input summary
+        # Show input summary only (no probabilities)
         with st.expander("📝 Input Summary", expanded=False):
             st.json(input_values)
 
@@ -558,12 +571,12 @@ if submitted:
             st.code(traceback.format_exc())
             st.warning("""
             **Troubleshooting:**
-            - Check if dataset has 'is_fraud' column for fraud rate calculations
-            - Verify all column names match the training data (feature names & preprocessing)
-            - Ensure date format is correct (MM/DD/YYYY or YYYY-MM-DD)
-            - If model expects scaled/encoded features, you must apply same preprocessing before prediction
-            - If unpickling fails due to sklearn internals, run the app with the scikit-learn version used to train the model.
+            - Confirm model implements `predict()` or `predict_proba()` or `decision_function()`.
+            - Verify engineered features match training features (names & dtypes).
+            - If your model only outputs probabilities and you want a different threshold,
+              replace `0.5` above with your chosen threshold (e.g., 0.7).
             """)
+
 
 # Footer
 st.markdown("---")
