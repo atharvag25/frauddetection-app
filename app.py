@@ -81,20 +81,40 @@ def find_data_file():
 @st.cache_resource
 def load_model(path):
     """Load model with joblib or pickle with multiple encoding attempts"""
+    import sys
+    
     # Try joblib first
     try:
         model = joblib.load(path)
         return model, "joblib"
     except Exception as joblib_error:
-        st.warning(f"Joblib loading failed: {joblib_error}")
+        st.warning(f"Joblib loading failed: {str(joblib_error)[:100]}")
     
-    # Try pickle with latin1 encoding (fixes STACK_GLOBAL error)
+    # Try fixing pickle protocol issues
+    try:
+        import io
+        import pickle5 as pickle_temp
+        with open(path, "rb") as f:
+            model = pickle_temp.load(f)
+        return model, "pickle5"
+    except:
+        pass
+    
+    # Try pickle with fix_imports
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f, fix_imports=True, encoding='latin1')
+        return model, "pickle (latin1 + fix_imports)"
+    except Exception as fix_imports_error:
+        st.warning(f"Pickle with fix_imports failed: {str(fix_imports_error)[:100]}")
+    
+    # Try pickle with latin1 encoding
     try:
         with open(path, "rb") as f:
             model = pickle.load(f, encoding='latin1')
         return model, "pickle (latin1)"
     except Exception as latin1_error:
-        st.warning(f"Pickle with latin1 failed: {latin1_error}")
+        st.warning(f"Pickle with latin1 failed: {str(latin1_error)[:100]}")
     
     # Try pickle with bytes encoding
     try:
@@ -102,15 +122,18 @@ def load_model(path):
             model = pickle.load(f, encoding='bytes')
         return model, "pickle (bytes)"
     except Exception as bytes_error:
-        st.warning(f"Pickle with bytes failed: {bytes_error}")
+        st.warning(f"Pickle with bytes failed: {str(bytes_error)[:100]}")
     
-    # Try standard pickle without encoding
+    # Try pickle with ASCII encoding
     try:
         with open(path, "rb") as f:
-            model = pickle.load(f)
-        return model, "pickle (default)"
-    except Exception as default_error:
-        st.error(f"All loading methods failed. Last error: {default_error}")
+            model = pickle.load(f, encoding='ASCII')
+        return model, "pickle (ASCII)"
+    except Exception as ascii_error:
+        st.warning(f"Pickle with ASCII failed: {str(ascii_error)[:100]}")
+    
+    st.error("❌ All loading methods failed. The model file is incompatible.")
+    st.error("**Solution Required:** You need to retrain and save the model.")
     
     return None, None
 
@@ -241,6 +264,65 @@ else:
 # Stop if no model
 if model is None:
     st.error("🚫 Cannot proceed without a model.")
+    
+    st.markdown("---")
+    st.markdown("### 🔧 How to Fix This Issue")
+    st.markdown("""
+    Your model file is incompatible with the current Python environment. You need to retrain and save the model properly.
+    
+    **Create a new Python script called `retrain_model.py` and run it:**
+    """)
+    
+    st.code("""
+import pandas as pd
+import joblib
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+
+# Load your dataset
+df = pd.read_csv('FRAUD DETECTION.csv')
+
+# Check column names
+print("Columns:", df.columns.tolist())
+
+# Identify target column (adjust if needed)
+target_col = 'is_fraud'  # Change this to match your actual target column name
+
+# Prepare features and target
+X = df.drop(target_col, axis=1)
+y = df[target_col]
+
+# Handle categorical variables
+categorical_cols = X.select_dtypes(include=['object']).columns
+le = LabelEncoder()
+
+for col in categorical_cols:
+    X[col] = le.fit_transform(X[col].astype(str))
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Train model
+print("Training model...")
+model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+model.fit(X_train, y_train)
+
+# Evaluate
+accuracy = model.score(X_test, y_test)
+print(f"Model Accuracy: {accuracy:.2%}")
+
+# Save model using joblib (recommended)
+joblib.dump(model, 'fraud_detector_final.pkl', compress=3)
+print("Model saved as 'fraud_detector_final.pkl'")
+
+# Verify the model can be loaded
+loaded_model = joblib.load('fraud_detector_final.pkl')
+print("✓ Model verified - can be loaded successfully!")
+    """, language="python")
+    
+    st.info("📝 **Steps:**\n1. Create `retrain_model.py` with the code above\n2. Update the target column name if needed\n3. Run: `python retrain_model.py`\n4. Refresh this Streamlit app")
+    
     st.stop()
 
 # Get unique values from dataset for dropdowns
