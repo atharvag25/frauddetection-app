@@ -4,6 +4,8 @@ import traceback
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
+import importlib
+import re
 
 import pandas as pd
 import streamlit as st
@@ -45,7 +47,6 @@ MODEL_EXT_CANDIDATES = [".pkl", ".joblib"]
 DATA_BASENAME = "FRAUD DETECTION"
 DATA_EXT_CANDIDATES = [".csv", ".xlsx", ".xls"]
 
-
 def get_file_list():
     """Get list of files in current directory (string names)."""
     try:
@@ -55,10 +56,9 @@ def get_file_list():
         st.error(f"Failed to list directory: {e}")
         return []
 
-
 def find_model_file():
     """
-    Search current dir and one-level subdirs (recursive) for matching model files.
+    Search current dir and subfolders for matching model files.
     Returns Path or None.
     """
     cwd = Path.cwd()
@@ -68,19 +68,19 @@ def find_model_file():
         if candidate.exists():
             return candidate
 
-    # Search recursively (one or many levels)
+    # Search recursively
     try:
-        # rglob covers subfolders too
         for p in cwd.rglob(f"{MODEL_BASENAME}*"):
             if p.is_file():
                 return p
     except Exception:
-        # fallback to listing files
-        for p in cwd.iterdir():
-            if p.is_file() and MODEL_BASENAME.lower() in p.name.lower():
-                return p
-    return None
+        pass
 
+    # fallback: any file with basename substring
+    for p in cwd.iterdir():
+        if p.is_file() and MODEL_BASENAME.lower() in p.name.lower():
+            return p
+    return None
 
 def find_data_file():
     """Return filepath and ext if found"""
@@ -99,48 +99,129 @@ def find_data_file():
             return cwd / f, ext
     return None, None
 
+def try_inject_stub_class(module_name: str, class_name: str) -> bool:
+    """
+    Try to import module_name and add a lightweight stub class/class alias
+    with the name class_name so pickle can find it during unpickling.
+    Returns True if injection succeeded.
+    """
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        return False
+
+    if hasattr(module, class_name):
+        return True
+
+    # create a minimal stub class
+    try:
+        # A very small class that accepts any args in __init__
+        def _init(self, *args, **kwargs):
+            pass
+
+        Stub = type(class_name, (), {"__init__": _init})
+        setattr(module, class_name, Stub)
+        return True
+    except Exception:
+        return False
+
+def analyze_unpickle_error_message(msg: str):
+    """
+    Try to extract missing global/class names from the pickle/unpickle error messages.
+    Returns a list of (module_name, class_name) guesses to attempt injection.
+    """
+    results = []
+    # common pattern from traceback: "Can't get attribute '_RemainderColsList' on <module 'sklearn.compose._column_transformer' ..."
+    m = re.search(r"Can't get attribute '([^']+)' on <module '([^']+)'", msg)
+    if m:
+        cls = m.group(1)
+        mod = m.group(2)
+        results.append((mod, cls))
+        return results
+
+    # other pickle AttributeError formats, fallback: look for names starting with underscore from sklearn
+    names = re.findall(r"_\w{3,}", msg)
+    for name in set(names):
+        # if it's sklearn related, try injecting into common sklearn modules
+        candidates = [
+            "sklearn.compose._column_transformer",
+            "sklearn.compose._data",
+            "sklearn.pipeline",
+            "sklearn.preprocessing"
+        ]
+        for c in candidates:
+            results.append((c, name))
+    return results
 
 @st.cache_resource
 def load_model_from_path(path: Path):
-    """Load model from a Path using joblib or pickle. Cached resource."""
+    """
+    Load model from a Path using joblib or pickle.
+    Attempts to monkeypatch missing classes if unpickling fails with AttributeError.
+    """
+    # Try joblib.load first (fast and common)
+    last_exc = None
     try:
         model = joblib.load(path)
         return model, "joblib"
-    except Exception:
-        try:
-            with open(path, "rb") as f:
-                model = pickle.load(f)
-            return model, "pickle"
-        except Exception as e:
-            raise RuntimeError(f"Failed to load model from path {path}: {e}")
+    except Exception as e:
+        last_exc = e
+        # Fall through to more advanced handling below
 
+    # Attempt to detect missing-class message and inject stubs
+    msg = "".join(traceback.format_exception_only(type(last_exc), last_exc))
+    candidates = analyze_unpickle_error_message(msg)
+
+    injected_any = False
+    for mod, cls in candidates:
+        injected = try_inject_stub_class(mod, cls)
+        injected_any = injected_any or injected
+
+    # If we injected stubs, try loading again with joblib then pickle
+    if injected_any:
+        try:
+            model = joblib.load(path)
+            return model, f"joblib (loaded after injecting stubs: {', '.join([c for _, c in candidates])})"
+        except Exception as e2:
+            last_exc = e2
+
+    # Last attempt: try pickle directly (some joblib files are pickles)
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f)
+        return model, "pickle"
+    except Exception as e3:
+        # If we get here, everything failed. Provide helpful guidance.
+        full_msg = "".join(traceback.format_exception(type(e3), e3, e3.__traceback__))
+        hint = (
+            "Model loading failed. Common cause: scikit-learn version mismatch between training and serving "
+            "environments (private classes moved/renamed). Recommended fixes:\n\n"
+            "1) Run the app with the same scikit-learn version used to save the model. Example (replace X.Y.Z with the version used to train):\n"
+            "   pip install scikit-learn==X.Y.Z\n\n"
+            "2) If you don't know the version, try common versions like 1.2.2 or 1.1.3.\n\n"
+            "3) As a temporary fallback, the app attempted to inject stub classes for: "
+            + ", ".join([f"{m}.{c}" for m, c in candidates]) + ".\n\n"
+            "Full unpickle error:\n" + full_msg
+        )
+        raise RuntimeError(hint) from e3
 
 def load_model_from_bytes(bytes_data: bytes, filename_hint: str = "uploaded_model"):
     """
     Load model from raw bytes by writing to a temporary file then loading.
     Returns (model, method) or raises.
     """
-    # preserve extension if possible
     suffix = Path(filename_hint).suffix if "." in filename_hint else ""
-    # Use NamedTemporaryFile to write bytes and pass path to joblib/pickle
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(bytes_data)
         tmp.flush()
         tmp_path = Path(tmp.name)
     try:
-        try:
-            model = joblib.load(tmp_path)
-            return model, "joblib (uploaded)"
-        except Exception:
-            with open(tmp_path, "rb") as f:
-                model = pickle.load(f)
-            return model, "pickle (uploaded)"
+        return load_model_from_path(tmp_path)
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
             pass
-
 
 @st.cache_data
 def load_dataset(path, ext):
@@ -157,14 +238,12 @@ def load_dataset(path, ext):
         st.error(f"Failed to load dataset: {e}")
         return None
 
-
 def calculate_fraud_rates(df, column, target='is_fraud'):
     """Calculate fraud rate for categorical columns"""
     if column not in df.columns or target not in df.columns:
         return {}
     fraud_rates = df.groupby(column)[target].mean().to_dict()
     return fraud_rates
-
 
 def engineer_features(input_data, df=None):
     """
@@ -189,33 +268,28 @@ def engineer_features(input_data, df=None):
 
     # Create interaction features
     if 'amount' in data.columns and 'customer_age' in data.columns:
-        # avoid division by zero
         data['amount_per_age'] = data['amount'] / (data['customer_age'] + 1)
     else:
         data['amount_per_age'] = 0
 
     # Calculate fraud rates from training data
     if df is not None:
-        # Purchase category fraud rate
         if 'purchase_category' in data.columns and 'purchase_category' in df.columns:
             fraud_rates = calculate_fraud_rates(df, 'purchase_category')
             data['purchase_category_fraud_rate'] = data['purchase_category'].map(fraud_rates).fillna(0.5)
         else:
             data['purchase_category_fraud_rate'] = 0.5
 
-        # Location fraud rate
         if 'location' in data.columns and 'location' in df.columns:
             fraud_rates = calculate_fraud_rates(df, 'location')
             data['location_fraud_rate'] = data['location'].map(fraud_rates).fillna(0.5)
         else:
             data['location_fraud_rate'] = 0.5
     else:
-        # Use default values if no training data available
         data['purchase_category_fraud_rate'] = 0.5
         data['location_fraud_rate'] = 0.5
 
     return data
-
 
 # Sidebar
 with st.sidebar:
@@ -254,7 +328,6 @@ with st.sidebar:
         if model_url and requests is None:
             st.warning("`requests` not available in environment. To enable URL download, add `requests` to requirements.txt.")
 
-
 # --- Load model logic: prefer uploaded file, then URL, then repo/workdir ---
 model = None
 model_method = None
@@ -267,8 +340,8 @@ if uploaded_model is not None:
         model, model_method = load_model_from_bytes(bytes_data, filename_hint=uploaded_model.name)
         st.success(f"✅ Model loaded from uploaded file: {uploaded_model.name}")
     except Exception as e:
-        st.error(f"Failed to load uploaded model: {e}")
-        with st.expander("Upload error details"):
+        st.error("Failed to load uploaded model.")
+        with st.expander("Upload error details", expanded=True):
             st.code(traceback.format_exc())
 elif model_url:
     if requests is None:
@@ -281,8 +354,8 @@ elif model_url:
             model, model_method = load_model_from_bytes(resp.content, filename_hint=model_url.split("/")[-1])
             st.success("✅ Model downloaded and loaded from URL")
         except Exception as e:
-            st.error(f"Failed to download/load model from URL: {e}")
-            with st.expander("Download error"):
+            st.error("Failed to download/load model from URL.")
+            with st.expander("Download error", expanded=True):
                 st.code(traceback.format_exc())
 else:
     model_path = find_model_file()
@@ -294,9 +367,10 @@ else:
             model, model_method = load_model_from_path(model_path)
             st.info(f"📦 Loaded using: **{model_method}**")
         except Exception as e:
-            st.error(f"Failed to load model from path: {e}")
-            with st.expander("Model load error"):
-                st.code(traceback.format_exc())
+            # load_model_from_path raises helpful RuntimeError with guidance
+            st.error("Failed to load model from path: see details below.")
+            with st.expander("Model load error", expanded=True):
+                st.text(str(e))
 
 # Load dataset (for fraud rate calculations and getting unique values)
 data_path, data_ext = find_data_file()
@@ -442,11 +516,9 @@ if submitted:
                 st.dataframe(X_engineered)
 
             # Make prediction
-            # Ensure the model receives columns it expects — if necessary, reindex or prepare
             try:
                 prediction = model.predict(X_engineered)[0]
             except Exception as e:
-                # Common cause: model expects different columns or preprocessing
                 raise RuntimeError(f"Model prediction failed. Check feature names & preprocessing. Details: {e}")
 
             # Get probability if available
@@ -490,6 +562,7 @@ if submitted:
             - Verify all column names match the training data (feature names & preprocessing)
             - Ensure date format is correct (MM/DD/YYYY or YYYY-MM-DD)
             - If model expects scaled/encoded features, you must apply same preprocessing before prediction
+            - If unpickling fails due to sklearn internals, run the app with the scikit-learn version used to train the model.
             """)
 
 # Footer
