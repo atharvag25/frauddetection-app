@@ -80,18 +80,39 @@ def find_data_file():
 
 @st.cache_resource
 def load_model(path):
-    """Load model with joblib or pickle"""
+    """Load model with joblib or pickle with multiple encoding attempts"""
+    # Try joblib first
     try:
         model = joblib.load(path)
         return model, "joblib"
-    except Exception:
-        try:
-            with open(path, "rb") as f:
-                model = pickle.load(f)
-            return model, "pickle"
-        except Exception as e:
-            st.error(f"Failed to load model: {e}")
-            return None, None
+    except Exception as joblib_error:
+        st.warning(f"Joblib loading failed: {joblib_error}")
+    
+    # Try pickle with latin1 encoding (fixes STACK_GLOBAL error)
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f, encoding='latin1')
+        return model, "pickle (latin1)"
+    except Exception as latin1_error:
+        st.warning(f"Pickle with latin1 failed: {latin1_error}")
+    
+    # Try pickle with bytes encoding
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f, encoding='bytes')
+        return model, "pickle (bytes)"
+    except Exception as bytes_error:
+        st.warning(f"Pickle with bytes failed: {bytes_error}")
+    
+    # Try standard pickle without encoding
+    try:
+        with open(path, "rb") as f:
+            model = pickle.load(f)
+        return model, "pickle (default)"
+    except Exception as default_error:
+        st.error(f"All loading methods failed. Last error: {default_error}")
+    
+    return None, None
 
 @st.cache_data
 def load_dataset(path, ext):
