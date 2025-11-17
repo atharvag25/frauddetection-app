@@ -326,7 +326,7 @@ with st.sidebar:
     st.markdown("### ⚖️ Decision Threshold & Display")
     FRAUD_THRESHOLD = st.slider(
         "Fraud Threshold (probability >= threshold → FRAUD)",
-        min_value=0.0, max_value=1.0, value=0.50, step=0.01
+        min_value=0.0, max_value=1.0, value=0.30, step=0.01
     )
     show_probability = st.checkbox("Show probability in results", value=True)
     st.caption("Lower the threshold to mark more transactions as fraud (more false positives).")
